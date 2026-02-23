@@ -28,7 +28,6 @@ const CHAIN_ALIASES = {
   polygon: 137, matic: 137, pol: 137,
   base: 8453,
   arbitrum: 42161, arb: 42161,
-  aztec: 677868,
   sepolia: 11155111,
   hardhat: 31337,
   bitcoin: "btc/mainnet", btc: "btc/mainnet",

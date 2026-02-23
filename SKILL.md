@@ -1,6 +1,6 @@
 ---
 name: openscan-crypto
-description: Navigate and query crypto networks via OpenScan infrastructure. Use when the user asks about blockchain data — balances (ETH, ERC20, BTC), blocks, transactions, gas prices, mempool, fee estimates, token lookups, event decoding, RPC endpoints, or ENS resolution. Supports Ethereum, Bitcoin, Arbitrum, Optimism, Base, Polygon, BNB, Sepolia, and Aztec. Powered by @openscan/network-connectors and @openscan/metadata.
+description: Navigate and query crypto networks via OpenScan infrastructure. Use when the user asks about blockchain data — balances (ETH, ERC20, BTC), blocks, transactions, gas prices, mempool, fee estimates, token lookups, event decoding, RPC endpoints, or ENS resolution. Supports Ethereum, Bitcoin, Arbitrum, Optimism, Base, Polygon, BNB and Sepolia. Powered by @openscan/network-connectors and @openscan/metadata.
 ---
 
 # OpenScan Crypto Network Skill
@@ -173,7 +173,6 @@ Returns: balance (BTC + sats), total received/sent, tx count, UTXO count.
 | polygon, matic, pol | 137 | Polygon |
 | base | 8453 | Base |
 | arbitrum, arb | 42161 | Arbitrum One |
-| aztec | 677868 | Aztec |
 | sepolia | 11155111 | Sepolia Testnet |
 | bitcoin, btc | bip122:... | Bitcoin Mainnet |
 

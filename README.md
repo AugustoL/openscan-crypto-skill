@@ -2,7 +2,7 @@
 
 An OpenClaw skill for querying blockchain data via [OpenScan](https://openscan.eth.link) infrastructure.
 
-Supports Ethereum, Arbitrum, Optimism, Base, Polygon, BNB, Sepolia, Aztec, and Bitcoin. All results include a direct `explorerLink` to the OpenScan explorer.
+Supports Ethereum, Arbitrum, Optimism, Base, Polygon, BNB, Sepolia, and Bitcoin. All results include a direct `explorerLink` to the OpenScan explorer.
 
 ## Installation
 
@@ -92,7 +92,6 @@ btc-address <address>                       # Address balance + tx count
 | `polygon`, `matic` | Polygon (137) |
 | `bnb`, `bsc` | BNB Smart Chain (56) |
 | `sepolia` | Sepolia Testnet (11155111) |
-| `aztec` | Aztec (677868) |
 | `bitcoin`, `btc` | Bitcoin Mainnet |
 
 Numeric chain IDs also work (e.g. `1`, `42161`).
