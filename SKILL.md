@@ -189,6 +189,32 @@ Numeric values are pre-formatted:
 - Timestamps: ISO 8601
 - Hex numbers: converted to decimal strings
 
+### Explorer Links
+
+EVM commands that return on-chain entities include an `explorerLink` field with a direct URL to [openscan.eth.link](https://openscan.eth.link):
+
+| Command | explorerLink points to |
+|---------|------------------------|
+| `balance` | address page |
+| `multi-balance` | address page per chain |
+| `block` | block page |
+| `tx` | transaction page |
+| `receipt` | transaction page |
+| `code` | address page |
+| `nonce` | address page |
+| `token` | token contract address page |
+| `logs` | transaction page per log |
+| `btc-block` | Bitcoin block page |
+| `btc-tx` | Bitcoin transaction page |
+| `btc-address` | Bitcoin address page |
+
+URL patterns:
+- EVM: `https://openscan.eth.link/#/{chainId}/{type}/{id}`
+- Bitcoin mainnet: `https://openscan.eth.link/#/btc/{type}/{id}`
+- Bitcoin testnet4: `https://openscan.eth.link/#/tbtc/{type}/{id}`
+
+Always show this link to the user so they can explore the data further in the UI.
+
 ## Caching
 
 Metadata cached in `~/.cache/openscan-crypto/` (6h TTL). RPC responses are NOT cached.

@@ -123,6 +123,24 @@ function chainToEventsPath(chainId) {
 
 // ── Output helpers ──────────────────────────────────────────────────────────
 
+const EXPLORER_BASE = "https://openscan.eth.link";
+
+const BTC_EXPLORER_SLUG = {
+  "btc/mainnet": "btc",
+  "btc/testnet4": "tbtc",
+};
+
+function explorerUrl(chainId, type, id) {
+  if (typeof chainId === "number") {
+    return `${EXPLORER_BASE}/#/${chainId}/${type}/${id}`;
+  }
+  const btcSlug = BTC_EXPLORER_SLUG[chainId];
+  if (btcSlug) {
+    return `${EXPLORER_BASE}/#/${btcSlug}/${type}/${id}`;
+  }
+  return undefined;
+}
+
 function out(data) {
   console.log(JSON.stringify(data, null, 2));
 }
@@ -206,6 +224,7 @@ async function cmdToken(query, chainFilter) {
             ...token,
             chain: networkName,
             chainId,
+            explorerLink: explorerUrl(chainId, "address", token.address),
           });
         }
       }
@@ -445,6 +464,7 @@ async function cmdBalance(address, chainInput, tokenQuery, privateOnly) {
     chainId,
     nativeBalance: `${nativeBalance} ${currency}`,
     nativeBalanceWei,
+    explorerLink: explorerUrl(chainId, "address", address),
   };
 
   // ERC20 token balance if requested
@@ -489,7 +509,7 @@ async function resolveToken(query, chainId) {
 }
 
 async function cmdBlock(blockId, chainInput, privateOnly) {
-  const { client } = await getEvmClient(chainInput || "ethereum", privateOnly);
+  const { client, chainId } = await getEvmClient(chainInput || "ethereum", privateOnly);
 
   let result;
   if (!blockId || blockId === "latest") {
@@ -504,23 +524,27 @@ async function cmdBlock(blockId, chainInput, privateOnly) {
   if (!result.success) err(`RPC error: ${JSON.stringify(result.errors)}`);
   if (!result.data) err(`Block not found: ${blockId}`);
 
-  out(formatBlock(result.data));
+  const formatted = formatBlock(result.data);
+  formatted.explorerLink = explorerUrl(chainId, "block", formatted.number);
+  out(formatted);
 }
 
 async function cmdTx(txHash, chainInput, privateOnly) {
   if (!txHash || !txHash.startsWith("0x")) err("Usage: tx <0xhash> [--chain <chain>]");
-  const { client } = await getEvmClient(chainInput || "ethereum", privateOnly);
+  const { client, chainId } = await getEvmClient(chainInput || "ethereum", privateOnly);
 
   const result = await client.getTransactionByHash(txHash);
   if (!result.success) err(`RPC error: ${JSON.stringify(result.errors)}`);
   if (!result.data) err(`Transaction not found: ${txHash}`);
 
-  out(formatTx(result.data));
+  const formatted = formatTx(result.data);
+  formatted.explorerLink = explorerUrl(chainId, "tx", txHash);
+  out(formatted);
 }
 
 async function cmdReceipt(txHash, chainInput, privateOnly) {
   if (!txHash || !txHash.startsWith("0x")) err("Usage: receipt <0xhash> [--chain <chain>]");
-  const { client } = await getEvmClient(chainInput || "ethereum", privateOnly);
+  const { client, chainId } = await getEvmClient(chainInput || "ethereum", privateOnly);
 
   const result = await client.getTransactionReceipt(txHash);
   if (!result.success) err(`RPC error: ${JSON.stringify(result.errors)}`);
@@ -538,6 +562,7 @@ async function cmdReceipt(txHash, chainInput, privateOnly) {
     }
   } catch { /* skip event decoding */ }
 
+  formatted.explorerLink = explorerUrl(chainId, "tx", txHash);
   out(formatted);
 }
 
@@ -585,7 +610,7 @@ async function cmdCall(to, data, chainInput, blockTag, privateOnly) {
 }
 
 async function cmdLogs(chainInput, address, topics, fromBlock, toBlock, privateOnly) {
-  const { client } = await getEvmClient(chainInput || "ethereum", privateOnly);
+  const { client, chainId } = await getEvmClient(chainInput || "ethereum", privateOnly);
 
   const filter = {};
   if (address) filter.address = address;
@@ -602,6 +627,7 @@ async function cmdLogs(chainInput, address, topics, fromBlock, toBlock, privateO
     transactionHash: log.transactionHash,
     topics: log.topics,
     data: log.data === "0x" ? "(empty)" : log.data.length > 138 ? `${log.data.slice(0, 138)}...` : log.data,
+    explorerLink: explorerUrl(chainId, "tx", log.transactionHash),
   }));
 
   out({ count: logs.length, truncated: (result.data || []).length > 50, logs });
@@ -609,7 +635,7 @@ async function cmdLogs(chainInput, address, topics, fromBlock, toBlock, privateO
 
 async function cmdCode(address, chainInput, privateOnly) {
   if (!address) err("Usage: code <address> [--chain <chain>]");
-  const { client } = await getEvmClient(chainInput || "ethereum", privateOnly);
+  const { client, chainId } = await getEvmClient(chainInput || "ethereum", privateOnly);
 
   const result = await client.getCode(address);
   if (!result.success) err(`RPC error: ${JSON.stringify(result.errors)}`);
@@ -621,17 +647,18 @@ async function cmdCode(address, chainInput, privateOnly) {
     isContract: !isEmpty,
     codeSize: isEmpty ? 0 : (code.length - 2) / 2,
     code: isEmpty ? "(EOA — no code)" : code.length > 200 ? `${code.slice(0, 200)}... (${(code.length - 2) / 2} bytes)` : code,
+    explorerLink: explorerUrl(chainId, "address", address),
   });
 }
 
 async function cmdNonce(address, chainInput, privateOnly) {
   if (!address) err("Usage: nonce <address> [--chain <chain>]");
-  const { client } = await getEvmClient(chainInput || "ethereum", privateOnly);
+  const { client, chainId } = await getEvmClient(chainInput || "ethereum", privateOnly);
 
   const result = await client.getTransactionCount(address);
   if (!result.success) err(`RPC error: ${JSON.stringify(result.errors)}`);
 
-  out({ address, nonce: hexToDecimal(result.data) });
+  out({ address, nonce: hexToDecimal(result.data), explorerLink: explorerUrl(chainId, "address", address) });
 }
 
 // ── ENS resolution ──────────────────────────────────────────────────────────
@@ -742,6 +769,11 @@ async function cmdMultiBalance(address, privateOnly) {
     return a.chain.localeCompare(b.chain);
   });
 
+  // Add per-chain explorer links
+  for (const r of results) {
+    r.explorerLink = explorerUrl(r.chainId, "address", address);
+  }
+
   out({ address, chains: results.length, balances: results });
 }
 
@@ -844,6 +876,7 @@ async function cmdBtcBlock(blockId) {
     previousBlockHash: b.previousblockhash || null,
     medianTime: new Date(b.mediantime * 1000).toISOString(),
     confirmations: b.confirmations,
+    explorerLink: explorerUrl("btc/mainnet", "block", b.hash),
   });
 }
 
@@ -884,6 +917,7 @@ async function cmdBtcTx(txid) {
       address: v.scriptPubKey?.address || null,
     })),
     truncated: tx.vin.length > 5 || tx.vout.length > 5,
+    explorerLink: explorerUrl("btc/mainnet", "tx", tx.txid),
   });
 }
 
@@ -961,6 +995,7 @@ async function cmdBtcAddress(address) {
     confirmedTxCount: data.chain_stats.tx_count,
     unconfirmedTxCount: data.mempool_stats.tx_count,
     utxoCount: data.chain_stats.funded_txo_count - data.chain_stats.spent_txo_count,
+    explorerLink: explorerUrl("btc/mainnet", "address", address),
   });
 }
 
