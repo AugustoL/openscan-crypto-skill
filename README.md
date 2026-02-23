@@ -1,4 +1,4 @@
-# openscan-crypto
+# Openscan Crypto OpenClaw Skill
 
 An OpenClaw skill for querying blockchain data via [OpenScan](https://openscan.eth.link) infrastructure.
 
