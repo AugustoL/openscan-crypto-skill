@@ -6,15 +6,23 @@ Supports Ethereum, Arbitrum, Optimism, Base, Polygon, BNB, Sepolia, Aztec, and B
 
 ## Installation
 
+Install via [ClawHub](https://clawhub.com):
+
+```bash
+clawhub install openscan-crypto
+```
+
+Or manually, by cloning this repo into your workspace `skills/` folder and running:
+
 ```bash
 bash install.sh
 ```
 
-This installs the `@openscan/network-connectors` dependency via npm.
+This installs the `@openscan/network-connectors` npm dependency required by the skill.
 
 ## Usage
 
-Once installed as a OpenClaw skill, ask naturally:
+Once installed, OpenClaw will automatically make the skill available to the agent. Just ask naturally:
 
 - "What's vitalik.eth's ETH balance?"
 - "Show me the latest Ethereum block"
