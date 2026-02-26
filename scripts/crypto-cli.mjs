@@ -12,6 +12,8 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { ClientFactory } from "@openscan/network-connectors";
+import { loadConfig, saveConfig, configExists, getEffectiveRpcs, setNetworkRpcs, setNetworkStrategy, addNetworkRpcs, removeNetworkRpc, resetNetwork, swapRpcs, moveRpc } from "./lib/rpcConfig.mjs";
+import { resolveMetadataVersion, syncMetadata, mergeIntoConfig, fetchNetworkRpcs, autoSelectRpcs, cdnBase, EVM_CHAIN_IDS } from "./lib/metadataSync.mjs";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -333,6 +335,53 @@ async function cmdProfile(type, id) {
   }
 }
 
+// ── RPC config helpers ──────────────────────────────────────────────────────
+
+/**
+ * Ensure RPC config exists. Auto-init from metadata on first use.
+ * Returns loaded config.
+ */
+async function ensureRpcConfig() {
+  let config = await loadConfig();
+  if (!config.lastFetched) {
+    // First run — auto-sync from metadata
+    const syncResult = await syncMetadata({
+      maxRpcs: config.defaults.maxRpcs,
+      privateOnly: config.defaults.privateOnly,
+    });
+    const { config: merged } = mergeIntoConfig(config, syncResult);
+    await saveConfig(merged);
+    process.stderr.write(`[openscan] First run: initialized RPC config from @openscan/metadata@${syncResult.version}\n`);
+    return merged;
+  }
+
+  // Check staleness (warn if > 24h)
+  const age = Date.now() - new Date(config.lastFetched).getTime();
+  if (age > 24 * 60 * 60 * 1000) {
+    process.stderr.write(`[openscan] RPC config is ${Math.floor(age / 3600000)}h old. Run "rpc-fetch" to update.\n`);
+  }
+
+  return config;
+}
+
+/**
+ * Fetch and save RPCs for a specific network on-demand (if not in config)
+ */
+async function fetchAndSaveNetwork(chainId, config) {
+  const version = config.metadataVersion || await resolveMetadataVersion();
+  const path = chainToRpcPath(chainId);
+  const data = await fetchNetworkRpcs(version, path);
+  if (!data?.endpoints) err(`No RPC data found for chain ${chainId}`);
+  const rpcs = autoSelectRpcs(data.endpoints, {
+    maxRpcs: config.defaults.maxRpcs,
+    privateOnly: config.defaults.privateOnly,
+  });
+  setNetworkRpcs(config, chainId, rpcs);
+  config.lastFetched = new Date().toISOString();
+  await saveConfig(config);
+  return rpcs;
+}
+
 // ── EVM client factory ──────────────────────────────────────────────────────
 
 async function getEvmClient(chainInput, privateOnly = false) {
@@ -340,21 +389,30 @@ async function getEvmClient(chainInput, privateOnly = false) {
   if (chainId === null) err(`Unknown chain: ${chainInput}`);
   if (typeof chainId === "string") err(`"${chainInput}" is not an EVM chain. Use EVM commands for EVM chains only.`);
 
-  const rpcData = await fetchMetadata(chainToRpcPath(chainId));
-  let endpoints = rpcData.endpoints.filter(e => e.isPublic);
-  if (privateOnly) endpoints = endpoints.filter(e => e.tracking === "none");
+  const config = await ensureRpcConfig();
+  let effective = getEffectiveRpcs(config, chainId);
 
-  // Sort: tracking=none first, then limited, then rest
-  const order = { none: 0, limited: 1, unspecified: 2, yes: 3 };
-  endpoints.sort((a, b) => (order[a.tracking] ?? 9) - (order[b.tracking] ?? 9));
+  if (!effective) {
+    // Network not in config — fetch on demand
+    await fetchAndSaveNetwork(chainId, config);
+    const reloaded = await loadConfig();
+    effective = getEffectiveRpcs(reloaded, chainId);
+  }
 
-  const rpcUrls = endpoints.map(e => e.url);
-  if (rpcUrls.length === 0) err(`No public RPCs available for chain ${chainId}`);
+  if (!effective || effective.rpcs.length === 0) {
+    err(`No RPCs configured for chain ${chainId}. Run: rpc-fetch`);
+  }
 
-  // Use at most 5 RPCs for fallback
+  // If --private flag, filter to tracking:none from configured RPCs
+  let rpcUrls = effective.rpcs;
+  if (privateOnly) {
+    rpcUrls = rpcUrls.filter(r => r.tracking === "none");
+    if (rpcUrls.length === 0) err(`No private (tracking:none) RPCs configured for chain ${chainId}`);
+  }
+
   const client = ClientFactory.createClient(chainId, {
-    type: "fallback",
-    rpcUrls: rpcUrls.slice(0, 5),
+    type: effective.strategy,
+    rpcUrls: rpcUrls.map(r => r.url),
   });
   return { client, chainId };
 }
@@ -732,19 +790,28 @@ async function resolveENS(name) {
 async function cmdMultiBalance(address, privateOnly) {
   const networksData = await fetchMetadata("networks.json");
   const evmChains = networksData.networks.filter(n => n.type === "evm" && !n.isTestnet);
+  const config = await ensureRpcConfig();
 
   const results = [];
   const promises = evmChains.map(async (network) => {
     try {
-      const rpcData = await fetchMetadata(chainToRpcPath(network.chainId));
-      let endpoints = rpcData.endpoints.filter(e => e.isPublic);
-      if (privateOnly) endpoints = endpoints.filter(e => e.tracking === "none");
-      const order = { none: 0, limited: 1, unspecified: 2, yes: 3 };
-      endpoints.sort((a, b) => (order[a.tracking] ?? 9) - (order[b.tracking] ?? 9));
-      const rpcUrls = endpoints.slice(0, 3).map(e => e.url);
+      // Use persisted RPC config
+      let effective = getEffectiveRpcs(config, network.chainId);
+      if (!effective) {
+        // Fetch on demand
+        await fetchAndSaveNetwork(network.chainId, config);
+        effective = getEffectiveRpcs(await loadConfig(), network.chainId);
+      }
+      if (!effective || effective.rpcs.length === 0) return;
+
+      let rpcUrls = effective.rpcs;
+      if (privateOnly) rpcUrls = rpcUrls.filter(r => r.tracking === "none");
       if (rpcUrls.length === 0) return;
 
-      const client = ClientFactory.createClient(network.chainId, { type: "fallback", rpcUrls });
+      const client = ClientFactory.createClient(network.chainId, {
+        type: effective.strategy,
+        rpcUrls: rpcUrls.map(r => r.url),
+      });
       const result = await client.getBalance(address);
       if (result.success) {
         const balance = weiToEth(result.data);
@@ -998,6 +1065,408 @@ async function cmdBtcAddress(address) {
   });
 }
 
+// ── RPC management commands ─────────────────────────────────────────────────
+
+async function cmdRpcFetch(chainInput) {
+  const config = await loadConfig();
+
+  if (chainInput) {
+    // Fetch for specific network
+    const chainId = resolveChain(chainInput);
+    if (chainId === null) err(`Unknown chain: ${chainInput}`);
+    const version = config.metadataVersion || await resolveMetadataVersion();
+    const path = chainToRpcPath(typeof chainId === "string" ? chainId : chainId);
+    const data = await fetchNetworkRpcs(version, path);
+    if (!data?.endpoints) err(`No RPC data for chain ${chainInput}`);
+    const rpcs = autoSelectRpcs(data.endpoints, {
+      maxRpcs: config.defaults.maxRpcs,
+      privateOnly: config.defaults.privateOnly,
+    });
+    setNetworkRpcs(config, chainId, rpcs);
+    config.metadataVersion = version;
+    config.lastFetched = new Date().toISOString();
+    await saveConfig(config);
+    out({
+      metadataVersion: version,
+      chain: chainInput,
+      chainId,
+      selected: rpcs.length,
+      total: data.endpoints.length,
+      strategy: config.networks[String(chainId)]?.strategy || config.defaults.strategy,
+      rpcs,
+    });
+  } else {
+    // Full sync all networks
+    const syncResult = await syncMetadata({
+      maxRpcs: config.defaults.maxRpcs,
+      privateOnly: config.defaults.privateOnly,
+    });
+    const { config: merged, stats } = mergeIntoConfig(config, syncResult);
+    await saveConfig(merged);
+    const summary = {};
+    for (const [chainId, net] of Object.entries(merged.networks)) {
+      summary[chainId] = {
+        selected: net.rpcs?.length || 0,
+        total: syncResult.allEndpoints[chainId]?.length || 0,
+        strategy: net.strategy || merged.defaults.strategy,
+      };
+    }
+    out({
+      metadataVersion: syncResult.version,
+      updated: stats.updated,
+      unchanged: stats.unchanged,
+      newRpcs: stats.newRpcs,
+      removedRpcs: stats.removedRpcs,
+      networks: summary,
+    });
+  }
+}
+
+async function cmdRpcList(chainInput, showAll, privateOnly) {
+  if (!chainInput) err("Usage: rpc-list <chain> [--all] [--private]");
+  const chainId = resolveChain(chainInput);
+  if (chainId === null) err(`Unknown chain: ${chainInput}`);
+  const config = await ensureRpcConfig();
+
+  if (showAll) {
+    // Show all available RPCs from metadata
+    const version = config.metadataVersion || await resolveMetadataVersion();
+    const path = chainToRpcPath(chainId);
+    const data = await fetchNetworkRpcs(version, path);
+    if (!data?.endpoints) err(`No RPC data for chain ${chainInput}`);
+
+    let endpoints = data.endpoints.filter(e => e.isPublic && !e.url.startsWith("wss://") && !e.url.includes("${"));
+    if (privateOnly) endpoints = endpoints.filter(e => e.tracking === "none");
+
+    // Mark which ones are currently active
+    const activeUrls = new Set((config.networks[String(chainId)]?.rpcs || []).map(r => r.url));
+
+    out({
+      chain: chainInput,
+      chainId,
+      metadataVersion: version,
+      totalEndpoints: endpoints.length,
+      tracking: {
+        none: endpoints.filter(e => e.tracking === "none").length,
+        limited: endpoints.filter(e => e.tracking === "limited").length,
+        other: endpoints.filter(e => e.tracking !== "none" && e.tracking !== "limited").length,
+      },
+      rpcs: endpoints.map((e, i) => ({
+        url: e.url,
+        tracking: e.tracking,
+        provider: e.provider || "unknown",
+        isOpenSource: e.isOpenSource || false,
+        active: activeUrls.has(e.url),
+        ...(activeUrls.has(e.url) ? { position: [...activeUrls].indexOf(e.url) + 1 } : {}),
+      })),
+    });
+  } else {
+    // Show active configured RPCs
+    const effective = getEffectiveRpcs(config, chainId);
+    if (!effective) {
+      out({
+        chain: chainInput,
+        chainId,
+        strategy: config.defaults.strategy,
+        source: "none",
+        rpcs: [],
+        hint: "No RPCs configured. Run: rpc-fetch",
+      });
+      return;
+    }
+    out({
+      chain: chainInput,
+      chainId,
+      strategy: effective.strategy,
+      source: "config",
+      metadataVersion: config.metadataVersion,
+      lastFetched: config.lastFetched,
+      rpcs: effective.rpcs.map((r, i) => ({
+        position: i + 1,
+        ...r,
+      })),
+    });
+  }
+}
+
+async function cmdRpcSet(args, flagValue, hasFlag) {
+  const config = await ensureRpcConfig();
+
+  // Global defaults
+  if (hasFlag("--default-strategy")) {
+    const s = flagValue("--default-strategy");
+    if (!["fallback", "race", "parallel"].includes(s)) err("Strategy must be: fallback, race, or parallel");
+    config.defaults.strategy = s;
+    await saveConfig(config);
+    out({ defaultStrategy: s });
+    return;
+  }
+  if (hasFlag("--max-rpcs")) {
+    const n = parseInt(flagValue("--max-rpcs"), 10);
+    if (isNaN(n) || n < 1) err("--max-rpcs must be a positive integer");
+    config.defaults.maxRpcs = n;
+    await saveConfig(config);
+    out({ defaultMaxRpcs: n });
+    return;
+  }
+
+  const chainInput = args[1];
+  if (!chainInput) err("Usage: rpc-set <chain> [--strategy <s>] [--add <url>] [--remove <url>] [--rpcs <url>...] [--reset] [--private-only]");
+  const chainId = resolveChain(chainInput);
+  if (chainId === null) err(`Unknown chain: ${chainInput}`);
+
+  // --reset
+  if (hasFlag("--reset")) {
+    resetNetwork(config, chainId);
+    // Re-fetch from metadata
+    await fetchAndSaveNetwork(chainId, config);
+    const reloaded = await loadConfig();
+    out({ chain: chainInput, chainId, action: "reset", rpcs: reloaded.networks[String(chainId)]?.rpcs || [] });
+    return;
+  }
+
+  // --strategy
+  if (hasFlag("--strategy")) {
+    const s = flagValue("--strategy");
+    if (!["fallback", "race", "parallel"].includes(s)) err("Strategy must be: fallback, race, or parallel");
+    setNetworkStrategy(config, chainId, s);
+  }
+
+  // --private-only
+  if (hasFlag("--private-only")) {
+    const net = config.networks[String(chainId)];
+    if (net?.rpcs) {
+      net.rpcs = net.rpcs.filter(r => r.tracking === "none");
+    }
+  }
+
+  // --add <url> [url2...]
+  if (hasFlag("--add")) {
+    const idx = args.indexOf("--add");
+    const urls = [];
+    for (let i = idx + 1; i < args.length; i++) {
+      if (args[i].startsWith("--")) break;
+      urls.push(args[i]);
+    }
+    if (urls.length === 0) err("--add requires at least one URL");
+    const newRpcs = urls.map(url => ({ url, tracking: "unknown", provider: "custom", isOpenSource: false }));
+    addNetworkRpcs(config, chainId, newRpcs);
+  }
+
+  // --remove <url>
+  if (hasFlag("--remove")) {
+    const url = flagValue("--remove");
+    if (!url) err("--remove requires a URL");
+    removeNetworkRpc(config, chainId, url);
+  }
+
+  // --rpcs <url1> <url2> ... (replace all)
+  if (hasFlag("--rpcs")) {
+    const idx = args.indexOf("--rpcs");
+    const urls = [];
+    for (let i = idx + 1; i < args.length; i++) {
+      if (args[i].startsWith("--")) break;
+      urls.push(args[i]);
+    }
+    if (urls.length === 0) err("--rpcs requires at least one URL");
+    const rpcs = urls.map(url => ({ url, tracking: "unknown", provider: "custom", isOpenSource: false }));
+    setNetworkRpcs(config, chainId, rpcs);
+  }
+
+  await saveConfig(config);
+  const effective = getEffectiveRpcs(config, chainId);
+  out({
+    chain: chainInput,
+    chainId,
+    strategy: effective?.strategy || config.defaults.strategy,
+    rpcs: effective?.rpcs || [],
+  });
+}
+
+async function cmdRpcOrder(args, flagValue, hasFlag) {
+  const chainInput = args[1];
+  if (!chainInput) err("Usage: rpc-order <chain> [<url> --position N] [--swap A B] [--benchmark]");
+  const chainId = resolveChain(chainInput);
+  if (chainId === null) err(`Unknown chain: ${chainInput}`);
+  const config = await ensureRpcConfig();
+
+  if (hasFlag("--benchmark")) {
+    // Benchmark all configured RPCs and reorder by latency
+    const effective = getEffectiveRpcs(config, chainId);
+    if (!effective || effective.rpcs.length === 0) err(`No RPCs configured for chain ${chainInput}`);
+
+    const results = await benchmarkRpcs(effective.rpcs.map(r => r.url));
+    // Sort by latency (ok first, then errors)
+    const sorted = [...results].sort((a, b) => {
+      if (a.status === "ok" && b.status !== "ok") return -1;
+      if (a.status !== "ok" && b.status === "ok") return 1;
+      return a.latencyMs - b.latencyMs;
+    });
+
+    // Rebuild RPC list in latency order
+    const rpcMap = new Map(effective.rpcs.map(r => [r.url, r]));
+    const reordered = sorted.map(r => rpcMap.get(r.url)).filter(Boolean);
+    setNetworkRpcs(config, chainId, reordered, effective.strategy);
+    await saveConfig(config);
+
+    out({
+      chain: chainInput,
+      chainId,
+      action: "benchmark-reorder",
+      results: sorted,
+      newOrder: reordered.map((r, i) => ({ position: i + 1, url: r.url, provider: r.provider })),
+    });
+    return;
+  }
+
+  if (hasFlag("--swap")) {
+    const idx = args.indexOf("--swap");
+    const a = parseInt(args[idx + 1], 10);
+    const b = parseInt(args[idx + 2], 10);
+    if (isNaN(a) || isNaN(b)) err("--swap requires two position numbers (1-indexed)");
+    swapRpcs(config, chainId, a, b);
+    await saveConfig(config);
+    out({ chain: chainInput, action: "swap", positions: [a, b], rpcs: config.networks[String(chainId)]?.rpcs || [] });
+    return;
+  }
+
+  // Move URL to position
+  const url = args[1 + 1]; // args[2] if it's a URL (not a flag)
+  if (url && !url.startsWith("--") && hasFlag("--position")) {
+    const pos = parseInt(flagValue("--position"), 10);
+    if (isNaN(pos)) err("--position requires a number (1-indexed)");
+    const rpcs = config.networks[String(chainId)]?.rpcs || [];
+    const fromIdx = rpcs.findIndex(r => r.url === url);
+    if (fromIdx === -1) err(`URL not found in config: ${url}`);
+    moveRpc(config, chainId, fromIdx, pos - 1);
+    await saveConfig(config);
+    out({ chain: chainInput, action: "move", url, toPosition: pos, rpcs: config.networks[String(chainId)]?.rpcs || [] });
+    return;
+  }
+
+  err("Usage: rpc-order <chain> [<url> --position N] [--swap A B] [--benchmark]");
+}
+
+/**
+ * Benchmark a list of RPC URLs — test latency, block number, client version
+ */
+async function benchmarkRpcs(urls) {
+  const results = await Promise.all(urls.map(async (url) => {
+    const start = Date.now();
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify([
+          { jsonrpc: "2.0", id: 1, method: "eth_blockNumber", params: [] },
+          { jsonrpc: "2.0", id: 2, method: "web3_clientVersion", params: [] },
+        ]),
+        signal: AbortSignal.timeout(10000),
+      });
+      const latencyMs = Date.now() - start;
+      const data = await res.json();
+
+      // Handle both batch and single responses
+      const responses = Array.isArray(data) ? data : [data];
+      const blockRes = responses.find(r => r.id === 1);
+      const versionRes = responses.find(r => r.id === 2);
+
+      const blockNumber = blockRes?.result ? parseInt(blockRes.result, 16) : null;
+      const clientVersion = versionRes?.result || null;
+
+      return { url, status: "ok", latencyMs, blockNumber, clientVersion };
+    } catch (e) {
+      return { url, status: "error", latencyMs: Date.now() - start, error: e.message };
+    }
+  }));
+
+  // Calculate block delta (max block - each block)
+  const maxBlock = Math.max(...results.filter(r => r.blockNumber).map(r => r.blockNumber));
+  for (const r of results) {
+    if (r.blockNumber) {
+      r.blockDelta = r.blockNumber - maxBlock;
+    }
+  }
+
+  return results;
+}
+
+async function cmdRpcTest(args, flagValue, hasFlag) {
+  const chainInput = args[1];
+  if (!chainInput) err("Usage: rpc-test <chain> [<url>] [--all]");
+  const chainId = resolveChain(chainInput);
+  if (chainId === null) err(`Unknown chain: ${chainInput}`);
+
+  const config = await ensureRpcConfig();
+
+  let urls;
+  const specificUrl = args[2] && !args[2].startsWith("--") ? args[2] : null;
+
+  if (specificUrl) {
+    urls = [specificUrl];
+  } else if (hasFlag("--all")) {
+    // Test all available RPCs from metadata
+    const version = config.metadataVersion || await resolveMetadataVersion();
+    const path = chainToRpcPath(chainId);
+    const data = await fetchNetworkRpcs(version, path);
+    if (!data?.endpoints) err(`No RPC data for chain ${chainInput}`);
+    urls = data.endpoints
+      .filter(e => e.isPublic && !e.url.startsWith("wss://") && !e.url.includes("${"))
+      .map(e => e.url);
+  } else {
+    const effective = getEffectiveRpcs(config, chainId);
+    if (!effective || effective.rpcs.length === 0) err(`No RPCs configured for chain ${chainInput}. Run: rpc-fetch`);
+    urls = effective.rpcs.map(r => r.url);
+  }
+
+  const results = await benchmarkRpcs(urls);
+
+  // Generate recommendation
+  const okResults = results.filter(r => r.status === "ok").sort((a, b) => a.latencyMs - b.latencyMs);
+  let recommendation = null;
+  if (okResults.length > 0) {
+    const fastest = okResults[0];
+    const behind = okResults.filter(r => r.blockDelta < 0);
+    const parts = [`${new URL(fastest.url).hostname} is fastest (${fastest.latencyMs}ms)`];
+    for (const r of behind) {
+      parts.push(`${new URL(r.url).hostname} is ${Math.abs(r.blockDelta)} blocks behind`);
+    }
+    recommendation = parts.join(". ");
+  }
+
+  out({
+    chain: chainInput,
+    chainId,
+    timestamp: new Date().toISOString(),
+    tested: results.length,
+    ok: okResults.length,
+    failed: results.length - okResults.length,
+    results,
+    recommendation,
+  });
+}
+
+async function cmdRpcStrategy(args) {
+  const config = await loadConfig();
+  if (!args[1]) {
+    // View current defaults
+    out({
+      defaultStrategy: config.defaults.strategy,
+      maxRpcs: config.defaults.maxRpcs,
+      privateOnly: config.defaults.privateOnly,
+      networkOverrides: Object.entries(config.networks)
+        .filter(([_, v]) => v.strategy)
+        .map(([k, v]) => ({ chainId: k, strategy: v.strategy })),
+    });
+    return;
+  }
+  const s = args[1];
+  if (!["fallback", "race", "parallel"].includes(s)) err("Strategy must be: fallback, race, or parallel");
+  config.defaults.strategy = s;
+  await saveConfig(config);
+  out({ defaultStrategy: s });
+}
+
 // ── CLI router ──────────────────────────────────────────────────────────────
 
 async function main() {
@@ -1033,6 +1502,14 @@ Bitcoin queries (mempool.space REST API):
   btc-mempool                           Mempool state + recent txs
   btc-fee                               Recommended fee rates
   btc-address <address>                 Address balance + tx count
+
+RPC management:
+  rpc-fetch [chain]                     Sync RPCs from metadata (all or one network)
+  rpc-list <chain> [--all] [--private]  Show active or all available RPCs
+  rpc-set <chain> [options]             Configure RPCs (--strategy, --add, --remove, --rpcs, --reset)
+  rpc-order <chain> [options]           Reorder RPCs (--benchmark, --swap A B, <url> --position N)
+  rpc-test <chain> [url] [--all]        Test/benchmark RPC latency
+  rpc-strategy [fallback|race|parallel] View/set default strategy
 
 Flags: --chain <chain>, --private (tracking:none RPCs only)
 Chain aliases: ethereum/eth, bitcoin/btc, arbitrum/arb, optimism/op, base, polygon/matic, bnb/bsc
@@ -1160,6 +1637,31 @@ Chain aliases: ethereum/eth, bitcoin/btc, arbitrum/arb, optimism/op, base, polyg
       case "btc-address":
         if (!args[1]) err("Usage: btc-address <address>");
         await cmdBtcAddress(args[1]);
+        break;
+
+      // ── RPC management ──
+      case "rpc-fetch":
+        await cmdRpcFetch(args[1]);
+        break;
+
+      case "rpc-list":
+        await cmdRpcList(args[1], hasFlag("--all"), hasFlag("--private"));
+        break;
+
+      case "rpc-set":
+        await cmdRpcSet(args, flagValue, hasFlag);
+        break;
+
+      case "rpc-order":
+        await cmdRpcOrder(args, flagValue, hasFlag);
+        break;
+
+      case "rpc-test":
+        await cmdRpcTest(args, flagValue, hasFlag);
+        break;
+
+      case "rpc-strategy":
+        await cmdRpcStrategy(args);
         break;
 
       default:

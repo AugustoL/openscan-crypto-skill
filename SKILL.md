@@ -47,6 +47,62 @@ crypto-cli.mjs profile networks ethereum
 crypto-cli.mjs profile apps openscan
 ```
 
+## RPC Management Commands
+
+RPCs are persisted in `~/.config/openscan-crypto/rpc-config.json`. On first use, the skill auto-fetches from `@openscan/metadata` and selects privacy-first RPCs. All subsequent commands use the persisted config.
+
+### Fetch/sync RPCs from metadata
+```bash
+crypto-cli.mjs rpc-fetch                # Sync all networks from @openscan/metadata
+crypto-cli.mjs rpc-fetch ethereum       # Sync a specific network
+```
+Resolves the latest metadata version dynamically from npm. Auto-selects RPCs (privacy-first, open-source preferred).
+
+### List RPCs
+```bash
+crypto-cli.mjs rpc-list ethereum              # Show active (configured) RPCs
+crypto-cli.mjs rpc-list ethereum --all        # Show ALL available RPCs from metadata
+crypto-cli.mjs rpc-list ethereum --all --private  # Only privacy (tracking:none)
+```
+
+### Configure RPCs
+```bash
+crypto-cli.mjs rpc-set ethereum --strategy race         # Set strategy: fallback|race|parallel
+crypto-cli.mjs rpc-set ethereum --add https://my-rpc.com  # Add custom RPC
+crypto-cli.mjs rpc-set ethereum --remove https://rpc.com  # Remove an RPC
+crypto-cli.mjs rpc-set ethereum --rpcs url1 url2 url3   # Replace all RPCs
+crypto-cli.mjs rpc-set ethereum --private-only           # Keep only tracking:none
+crypto-cli.mjs rpc-set ethereum --reset                  # Reset to metadata defaults
+crypto-cli.mjs rpc-set --default-strategy parallel       # Set global default strategy
+crypto-cli.mjs rpc-set --max-rpcs 3                      # Set global max RPCs per network
+```
+
+### Reorder RPCs
+```bash
+crypto-cli.mjs rpc-order ethereum --benchmark            # Auto-sort by latency (fastest first)
+crypto-cli.mjs rpc-order ethereum --swap 1 3             # Swap positions 1 and 3
+crypto-cli.mjs rpc-order ethereum <url> --position 1     # Move URL to position 1
+```
+
+### Test/benchmark RPCs
+```bash
+crypto-cli.mjs rpc-test ethereum              # Test all configured RPCs
+crypto-cli.mjs rpc-test ethereum --all        # Test ALL available from metadata
+crypto-cli.mjs rpc-test ethereum <url>        # Test a specific URL
+```
+Tests latency, block number, client version. Detects out-of-sync nodes via block delta.
+
+### View/set default strategy
+```bash
+crypto-cli.mjs rpc-strategy                   # View defaults + per-network overrides
+crypto-cli.mjs rpc-strategy parallel           # Set global default to parallel
+```
+
+**Strategies:**
+- `fallback` — Try RPCs in order, move to next on failure. Default. Most conservative.
+- `race` — Fire all RPCs simultaneously, use fastest response. Best for latency.
+- `parallel` — Fire all, compare results, detect inconsistencies. Trustless verification.
+
 ## EVM Query Commands
 
 All EVM commands accept `--chain <chain>` (default: ethereum) and `--private` (use tracking:none RPCs only).
