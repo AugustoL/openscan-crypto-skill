@@ -849,18 +849,25 @@ const BITCOIN_MAINNET = "bip122:000000000019d6689c085ae165831e93";
 const BTC_REST_API = "https://mempool.space/api"; // fallback for address lookups
 
 async function getBtcClient() {
-  const rpcData = await fetchMetadata("rpcs/btc/mainnet.json");
-  // Filter for JSON-RPC compatible endpoints (exclude REST-only APIs)
-  const jsonRpcEndpoints = rpcData.endpoints
-    .filter(e => e.isPublic && !e.url.includes("mempool.space") && !e.url.includes("blockstream") && !e.url.includes("blockchain.info"))
-    .map(e => e.url);
+  const config = await ensureRpcConfig();
+  const effective = getEffectiveRpcs(config, "btc/mainnet");
 
-  // If no JSON-RPC endpoints found, try all of them (some may work)
-  const rpcUrls = jsonRpcEndpoints.length > 0
-    ? jsonRpcEndpoints
-    : rpcData.endpoints.filter(e => e.isPublic).map(e => e.url);
+  if (effective && effective.rpcs.length > 0) {
+    // Use persisted config — filter out REST-only APIs for JSON-RPC client
+    const jsonRpcUrls = effective.rpcs
+      .filter(r => !r.url.includes("mempool.space") && !r.url.includes("blockstream") && !r.url.includes("blockchain.info"))
+      .map(r => r.url);
+    const rpcUrls = jsonRpcUrls.length > 0 ? jsonRpcUrls : effective.rpcs.map(r => r.url);
+    return ClientFactory.createClient(BITCOIN_MAINNET, { type: effective.strategy, rpcUrls });
+  }
 
-  return ClientFactory.createClient(BITCOIN_MAINNET, { type: "fallback", rpcUrls });
+  // Fallback: fetch from metadata on demand
+  await fetchAndSaveNetwork("btc/mainnet", config);
+  const reloaded = await loadConfig();
+  const eff = getEffectiveRpcs(reloaded, "btc/mainnet");
+  const rpcUrls = (eff?.rpcs || []).map(r => r.url);
+  if (rpcUrls.length === 0) err("No RPCs available for Bitcoin. Run: rpc-fetch");
+  return ClientFactory.createClient(BITCOIN_MAINNET, { type: eff?.strategy || "fallback", rpcUrls });
 }
 
 function satsToBtc(sats) {
@@ -1330,8 +1337,9 @@ async function cmdRpcOrder(args, flagValue, hasFlag) {
     return;
   }
 
-  // Move URL to position
-  const url = args[1 + 1]; // args[2] if it's a URL (not a flag)
+  // Move URL to position: rpc-order <chain> <url> --position N
+  // args[0] = "rpc-order", args[1] = chain, args[2] = url
+  const url = args[2];
   if (url && !url.startsWith("--") && hasFlag("--position")) {
     const pos = parseInt(flagValue("--position"), 10);
     if (isNaN(pos)) err("--position requires a number (1-indexed)");
