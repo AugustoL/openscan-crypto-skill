@@ -110,6 +110,13 @@ crypto-cli.mjs price --chain arbitrum   # ETH price (fetched from mainnet for L2
 ```
 Fetches prices from Uniswap V2-style DEX pools. Uses median of multiple pools for manipulation resistance. Returns per-pool breakdown.
 
+### Decode transaction (function call + events)
+```bash
+crypto-cli.mjs decode-tx <0xhash>                  # Decode function + events
+crypto-cli.mjs decode-tx <0xhash> --chain arbitrum  # On another chain
+```
+Decodes transaction input data into human-readable function name + parameters. Also decodes all event logs in the receipt. Uses local database of known selectors + 4byte.directory fallback. Identifies tx type: transfer, contract_call, or contract_creation.
+
 **Strategies:**
 - `fallback` — Try RPCs in order, move to next on failure. Default. Most conservative.
 - `race` — Fire all RPCs simultaneously, use fastest response. Best for latency.

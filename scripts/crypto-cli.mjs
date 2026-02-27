@@ -16,6 +16,8 @@ import { loadConfig, saveConfig, configExists, getEffectiveRpcs, setNetworkRpcs,
 import { resolveMetadataVersion, syncMetadata, mergeIntoConfig, fetchNetworkRpcs, autoSelectRpcs, cdnBase, EVM_CHAIN_IDS } from "./lib/metadataSync.mjs";
 import { getNativeTokenPrice, getBTCPrice, formatPrice } from "./lib/priceService.mjs";
 import { ETH_NATIVE_CHAINS } from "./lib/priceFeeds.mjs";
+import { decodeFunctionInput } from "./lib/inputDecoder.mjs";
+import { decodeEventLog, formatDecodedValue } from "./lib/eventDecoder.mjs";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -1143,6 +1145,110 @@ async function cmdPrice(tokenInput, chainInput, privateOnly) {
   });
 }
 
+// ── Decode-tx command ───────────────────────────────────────────────────────
+
+async function cmdDecodeTx(txHash, chainInput, privateOnly) {
+  if (!txHash) err("Usage: decode-tx <0xhash> [--chain <chain>]");
+  const { client, chainId } = await getEvmClient(chainInput || "ethereum", privateOnly);
+
+  // Fetch tx and receipt in parallel
+  const [txResult, receiptResult] = await Promise.all([
+    client.getTransactionByHash(txHash),
+    client.getTransactionReceipt(txHash),
+  ]);
+
+  const tx = txResult.success ? txResult.data : null;
+  if (!tx) err(`Transaction ${txHash} not found`);
+
+  const receipt = receiptResult.success ? receiptResult.data : null;
+
+  // Decode function input
+  const inputDecoded = await decodeFunctionInput(tx.input || tx.data || "0x");
+
+  // Decode event logs from receipt
+  const events = [];
+  if (receipt?.logs) {
+    for (const log of receipt.logs) {
+      const topics = log.topics || [];
+      const data = log.data || "0x";
+      const decoded = await decodeEventLog(topics, data);
+      if (decoded) {
+        events.push({
+          logIndex: log.logIndex ? parseInt(log.logIndex, 16) : undefined,
+          contract: log.address,
+          ...decoded,
+          params: decoded.params.map(p => ({
+            ...p,
+            formatted: formatDecodedValue(p.value, p.type),
+          })),
+        });
+      } else {
+        // Unknown event — include raw
+        events.push({
+          logIndex: log.logIndex ? parseInt(log.logIndex, 16) : undefined,
+          contract: log.address,
+          name: null,
+          topic0: topics[0] || null,
+          params: [],
+          raw: { topics, data },
+        });
+      }
+    }
+  }
+
+  // Build result
+  const value = tx.value ? weiToEth(tx.value) : "0";
+  const gasUsed = receipt?.gasUsed ? hexToDecimal(receipt.gasUsed) : null;
+  const status = receipt?.status
+    ? (parseInt(receipt.status, 16) === 1 ? "success" : "reverted")
+    : "unknown";
+
+  // Determine tx type
+  let txType = "contract_call";
+  if (!tx.input || tx.input === "0x") txType = "transfer";
+  else if (!tx.to) txType = "contract_creation";
+
+  const result = {
+    txHash,
+    chain: chainInput || "ethereum",
+    chainId,
+    txType,
+    from: tx.from,
+    to: tx.to || null,
+    value: value > 0 ? `${value} ETH` : "0",
+    status,
+    gasUsed,
+    blockNumber: tx.blockNumber ? parseInt(tx.blockNumber, 16) : null,
+  };
+
+  // Add function decode
+  if (inputDecoded) {
+    if (inputDecoded.functionName) {
+      result.function = {
+        name: inputDecoded.functionName,
+        signature: inputDecoded.signature,
+        selector: inputDecoded.selector,
+        source: inputDecoded.source,
+        params: inputDecoded.params,
+      };
+    } else if (inputDecoded.selector) {
+      result.function = {
+        selector: inputDecoded.selector,
+        source: "unknown",
+        rawCalldata: inputDecoded.rawCalldata,
+      };
+    }
+  }
+
+  // Add events
+  if (events.length > 0) {
+    result.events = events;
+  }
+
+  result.explorerLink = explorerUrl(chainId, "tx", txHash);
+  out(result);
+}
+
 // ── RPC management commands ─────────────────────────────────────────────────
 
 async function cmdRpcFetch(chainInput) {
@@ -1582,9 +1688,10 @@ Bitcoin queries (mempool.space REST API):
   btc-fee                               Recommended fee rates
   btc-address <address>                 Address balance + tx count
 
-Price:
+Price & Analysis:
   price [ETH|BTC|MATIC|BNB]              On-chain token price from DEX pools
   price --chain polygon                   Native token price for a specific chain
+  decode-tx <0xhash>                      Decode tx function call + event logs
 
 RPC management:
   rpc-fetch [chain]                     Sync RPCs from metadata (all or one network)
@@ -1722,9 +1829,13 @@ Chain aliases: ethereum/eth, bitcoin/btc, arbitrum/arb, optimism/op, base, polyg
         await cmdBtcAddress(args[1]);
         break;
 
-      // ── Price ──
+      // ── Price & Analysis ──
       case "price":
         await cmdPrice(args[1], flagValue("--chain"), hasFlag("--private"));
+        break;
+
+      case "decode-tx":
+        await cmdDecodeTx(args[1], flagValue("--chain"), hasFlag("--private"));
         break;
 
       // ── RPC management ──
