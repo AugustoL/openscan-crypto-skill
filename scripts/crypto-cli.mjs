@@ -14,6 +14,8 @@ import { homedir } from "node:os";
 import { ClientFactory } from "@openscan/network-connectors";
 import { loadConfig, saveConfig, configExists, getEffectiveRpcs, setNetworkRpcs, setNetworkStrategy, addNetworkRpcs, removeNetworkRpc, resetNetwork, swapRpcs, moveRpc } from "./lib/rpcConfig.mjs";
 import { resolveMetadataVersion, syncMetadata, mergeIntoConfig, fetchNetworkRpcs, autoSelectRpcs, cdnBase, EVM_CHAIN_IDS } from "./lib/metadataSync.mjs";
+import { getNativeTokenPrice, getBTCPrice, formatPrice } from "./lib/priceService.mjs";
+import { ETH_NATIVE_CHAINS } from "./lib/priceFeeds.mjs";
 
 // ── Config ──────────────────────────────────────────────────────────────────
 
@@ -1072,6 +1074,75 @@ async function cmdBtcAddress(address) {
   });
 }
 
+// ── Price command ───────────────────────────────────────────────────────────
+
+/**
+ * Get the first RPC URL for a chain from persisted config
+ */
+async function getRpcUrlForChain(chainId) {
+  const config = await ensureRpcConfig();
+  const effective = getEffectiveRpcs(config, chainId);
+  if (!effective || effective.rpcs.length === 0) {
+    await fetchAndSaveNetwork(chainId, config);
+    const reloaded = await loadConfig();
+    const eff = getEffectiveRpcs(reloaded, chainId);
+    return eff?.rpcs?.[0]?.url || null;
+  }
+  return effective.rpcs[0].url;
+}
+
+async function cmdPrice(tokenInput, chainInput, privateOnly) {
+  // If tokenInput starts with -- it's a flag, not a token
+  const token = (tokenInput && !tokenInput.startsWith("--") ? tokenInput : "ETH").toUpperCase();
+
+  if (token === "BTC" || token === "BITCOIN" || token === "WBTC") {
+    // BTC price from WBTC pools on mainnet
+    const mainnetRpc = await getRpcUrlForChain(1);
+    if (!mainnetRpc) err("No RPC configured for Ethereum mainnet. Run: rpc-fetch");
+    const result = await getBTCPrice(mainnetRpc);
+    if (result.price === null) err("Could not fetch BTC price from on-chain pools");
+    out({
+      token: "BTC",
+      price: formatPrice(result.price),
+      priceRaw: Math.round(result.price * 100) / 100,
+      method: `on-chain DEX (median of ${result.pools.filter(p => p.price).length} pools)`,
+      pools: result.pools.map(p => ({ name: p.name, price: p.price ? Math.round(p.price * 100) / 100 : null })),
+      timestamp: new Date().toISOString(),
+    });
+    return;
+  }
+
+  // Native token price for a chain
+  const chainId = chainInput ? resolveChain(chainInput) : 1;
+  if (chainId === null || typeof chainId === "string") err("Price requires an EVM chain");
+
+  const rpcUrl = await getRpcUrlForChain(chainId);
+  if (!rpcUrl) err(`No RPC configured for chain ${chainId}. Run: rpc-fetch`);
+
+  // For L2s, also need mainnet RPC for ETH price
+  let mainnetRpc = null;
+  if (ETH_NATIVE_CHAINS.has(chainId)) {
+    mainnetRpc = await getRpcUrlForChain(1);
+  }
+
+  const result = await getNativeTokenPrice(chainId, rpcUrl, mainnetRpc);
+  if (result.price === null) err(`Could not fetch price for chain ${chainId}. No DEX pools configured or pools returned no data.`);
+
+  // Determine token symbol
+  const tokenSymbols = { 1: "ETH", 10: "ETH", 42161: "ETH", 8453: "ETH", 11155111: "ETH", 137: "MATIC", 56: "BNB" };
+  const symbol = token !== "ETH" ? token : (tokenSymbols[chainId] || "NATIVE");
+
+  out({
+    token: symbol,
+    chainId,
+    price: formatPrice(result.price),
+    priceRaw: Math.round(result.price * 100) / 100,
+    method: `on-chain DEX (median of ${result.pools.filter(p => p.price).length} pools)`,
+    pools: result.pools.map(p => ({ name: p.name, price: p.price ? Math.round(p.price * 100) / 100 : null })),
+    timestamp: new Date().toISOString(),
+  });
+}
+
 // ── RPC management commands ─────────────────────────────────────────────────
 
 async function cmdRpcFetch(chainInput) {
@@ -1511,6 +1582,10 @@ Bitcoin queries (mempool.space REST API):
   btc-fee                               Recommended fee rates
   btc-address <address>                 Address balance + tx count
 
+Price:
+  price [ETH|BTC|MATIC|BNB]              On-chain token price from DEX pools
+  price --chain polygon                   Native token price for a specific chain
+
 RPC management:
   rpc-fetch [chain]                     Sync RPCs from metadata (all or one network)
   rpc-list <chain> [--all] [--private]  Show active or all available RPCs
@@ -1645,6 +1720,11 @@ Chain aliases: ethereum/eth, bitcoin/btc, arbitrum/arb, optimism/op, base, polyg
       case "btc-address":
         if (!args[1]) err("Usage: btc-address <address>");
         await cmdBtcAddress(args[1]);
+        break;
+
+      // ── Price ──
+      case "price":
+        await cmdPrice(args[1], flagValue("--chain"), hasFlag("--private"));
         break;
 
       // ── RPC management ──

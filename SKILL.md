@@ -98,6 +98,18 @@ crypto-cli.mjs rpc-strategy                   # View defaults + per-network over
 crypto-cli.mjs rpc-strategy parallel           # Set global default to parallel
 ```
 
+## Price Commands
+
+### On-chain token price (100% on-chain, no CoinGecko)
+```bash
+crypto-cli.mjs price                    # ETH price (default)
+crypto-cli.mjs price BTC                # BTC price (via WBTC pools on mainnet)
+crypto-cli.mjs price --chain polygon    # MATIC price
+crypto-cli.mjs price --chain bnb        # BNB price
+crypto-cli.mjs price --chain arbitrum   # ETH price (fetched from mainnet for L2s)
+```
+Fetches prices from Uniswap V2-style DEX pools. Uses median of multiple pools for manipulation resistance. Returns per-pool breakdown.
+
 **Strategies:**
 - `fallback` — Try RPCs in order, move to next on failure. Default. Most conservative.
 - `race` — Fire all RPCs simultaneously, use fastest response. Best for latency.
