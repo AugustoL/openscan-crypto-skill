@@ -98,6 +98,26 @@ crypto-cli.mjs rpc-strategy                   # View defaults + per-network over
 crypto-cli.mjs rpc-strategy parallel           # Set global default to parallel
 ```
 
+## Address Info Command
+
+### Aggregate address information
+```bash
+crypto-cli.mjs address-info <address>              # Full address info
+crypto-cli.mjs address-info vitalik.eth            # ENS name supported
+crypto-cli.mjs address-info <address> --chain base # On another chain
+crypto-cli.mjs address-info <address> --private    # Privacy RPCs only
+```
+
+Returns in a single call:
+- **type**: `EOA` or `contract` (with `codeSize` if contract)
+- **balance**: native balance (ETH/MATIC/BNB, etc.)
+- **txCount**: total transaction count (nonce)
+- **ensName**: primary ENS name via reverse lookup (Ethereum mainnet only)
+- **label**: metadata label if the address is a known entity (name, tags, description, website)
+- **explorerLink**: direct link to the OpenScan explorer
+
+This command fires `balance`, `code`, and `nonce` in parallel, then enriches the result with ENS reverse resolution and metadata label lookup.
+
 ## Price Commands
 
 ### On-chain token price (100% on-chain, no CoinGecko)
@@ -281,6 +301,7 @@ EVM commands that return on-chain entities include an `explorerLink` field with 
 | `btc-block` | Bitcoin block page |
 | `btc-tx` | Bitcoin transaction page |
 | `btc-address` | Bitcoin address page |
+| `address-info` | address page |
 
 URL patterns:
 - EVM: `https://openscan.eth.link/#/{chainId}/{type}/{id}`
@@ -320,6 +341,10 @@ All EVM address commands accept `.eth` names (e.g., `vitalik.eth`). ENS is resol
 | "Show privacy-friendly Polygon RPCs" | `rpcs polygon --private` |
 | "Show vitalik.eth balance on all chains" | `multi-balance vitalik.eth` |
 | "What's the latest Bitcoin block?" | `btc-info` or `btc-block` |
+| "Tell me everything about this address" | `address-info 0x...` |
+| "Is 0x... a wallet or a contract?" | `address-info 0x...` |
+| "What's the ENS name for 0x...?" | `address-info 0x...` (reverse ENS) |
+| "Show me info for vitalik.eth" | `address-info vitalik.eth` |
 | "How full is the Bitcoin mempool?" | `btc-mempool` |
 | "What are Bitcoin fees right now?" | `btc-fee` |
 | "Look up this Bitcoin transaction" | `btc-tx <txid>` |

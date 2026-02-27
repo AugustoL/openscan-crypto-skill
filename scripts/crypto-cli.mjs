@@ -1076,6 +1076,142 @@ async function cmdBtcAddress(address) {
   });
 }
 
+// ── Address info command ────────────────────────────────────────────────────
+
+/**
+ * Reverse ENS lookup: given an address, find its primary ENS name.
+ * Uses <address>.addr.reverse → resolver → name(bytes32).
+ */
+async function reverseENS(address) {
+  try {
+    const { client } = await getEvmClient("ethereum");
+    const callFn = client.callContract?.bind(client) || client.call?.bind(client);
+    if (!callFn) return null;
+
+    // Build the reverse node: namehash("<lc_addr_no0x>.addr.reverse")
+    const addrLower = address.toLowerCase().replace("0x", "");
+    const labels = [`${addrLower}`, "addr", "reverse"];
+
+    let node = "0000000000000000000000000000000000000000000000000000000000000000";
+    for (let i = labels.length - 1; i >= 0; i--) {
+      const labelHex = Buffer.from(labels[i]).toString("hex");
+      const labelHashResult = await client.sha3("0x" + labelHex);
+      if (!labelHashResult.success) return null;
+      const labelHash = labelHashResult.data.slice(2);
+      const combined = "0x" + node + labelHash;
+      const nodeResult = await client.sha3(combined);
+      if (!nodeResult.success) return null;
+      node = nodeResult.data.slice(2);
+    }
+
+    // Get resolver from ENS registry
+    const ENS_REGISTRY = "0x00000000000C2E074eC69A0dFb2997BA6C7d2e1e";
+    const resolverResult = await callFn({ to: ENS_REGISTRY, data: "0x0178b8bf" + node });
+    if (!resolverResult.success || !resolverResult.data || resolverResult.data === "0x" + "0".repeat(64)) {
+      return null;
+    }
+    const resolverAddr = "0x" + resolverResult.data.slice(26);
+    if (resolverAddr === "0x0000000000000000000000000000000000000000") return null;
+
+    // Call name(bytes32) on the resolver — selector 0x691f3431
+    const nameResult = await callFn({ to: resolverAddr, data: "0x691f3431" + node });
+    if (!nameResult.success || !nameResult.data || nameResult.data === "0x") return null;
+
+    // Decode ABI-encoded string: skip first 64 bytes (offset), next 32 = length, then UTF-8 bytes
+    const hex = nameResult.data.slice(2);
+    if (hex.length < 128) return null;
+    const strLen = parseInt(hex.slice(64, 128), 16);
+    if (strLen === 0) return null;
+    const strHex = hex.slice(128, 128 + strLen * 2);
+    const name = Buffer.from(strHex, "hex").toString("utf-8");
+    return name || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Look up address in OpenScan metadata labeled addresses.
+ */
+async function lookupLabeledAddress(address, chainId) {
+  try {
+    const data = await fetchMetadata(`addresses/evm/${chainId}/all.json`);
+    const lc = address.toLowerCase();
+    const found = (data.addresses || []).find(a => a.address?.toLowerCase() === lc);
+    return found || null;
+  } catch {
+    return null;
+  }
+}
+
+async function cmdAddressInfo(rawAddress, chainInput, privateOnly) {
+  if (!rawAddress) err("Usage: address-info <address|name.eth> [--chain <chain>] [--private]");
+
+  // Resolve ENS name if provided
+  const address = await resolveENS(rawAddress);
+  const isENSInput = rawAddress !== address;
+
+  const { client, chainId } = await getEvmClient(chainInput || "ethereum", privateOnly);
+  const callFn = client.callContract?.bind(client) || client.call?.bind(client);
+
+  // Fire balance, code, nonce in parallel
+  const [balanceResult, codeResult, nonceResult] = await Promise.all([
+    client.getBalance(address),
+    client.getCode(address),
+    client.getTransactionCount(address),
+  ]);
+
+  // Parse results
+  const nativeBalance = balanceResult.success ? weiToEth(balanceResult.data) : null;
+  const nativeBalanceWei = balanceResult.success ? hexToDecimal(balanceResult.data) : null;
+
+  const code = codeResult.success ? codeResult.data : null;
+  const isContract = code && code !== "0x" && code !== "0x0";
+  const codeSize = isContract ? (code.length - 2) / 2 : 0;
+
+  const txCount = nonceResult.success ? parseInt(hexToDecimal(nonceResult.data), 10) : null;
+
+  // Get currency symbol
+  const networksData = await fetchMetadata("networks.json");
+  const network = networksData.networks.find(n => n.chainId === chainId);
+  const currency = network?.currency || "ETH";
+
+  // ENS reverse lookup (mainnet only — or if already on mainnet)
+  let ensName = null;
+  if (isENSInput) {
+    ensName = rawAddress; // we already know the ENS name
+  } else if (chainId === 1) {
+    ensName = await reverseENS(address);
+  }
+
+  // Labeled address from metadata
+  const label = await lookupLabeledAddress(address, chainId);
+
+  // Build output
+  const output = {
+    address,
+    chain: network?.shortName || `Chain ${chainId}`,
+    chainId,
+    type: isContract ? "contract" : "EOA",
+    ...(isContract ? { codeSize: `${codeSize} bytes` } : {}),
+    balance: nativeBalance !== null ? `${nativeBalance} ${currency}` : "unavailable",
+    balanceWei: nativeBalanceWei,
+    txCount: txCount !== null ? txCount : "unavailable",
+    ...(ensName ? { ensName } : {}),
+    ...(label ? {
+      label: {
+        name: label.name,
+        tags: label.tags || [],
+        description: label.description || null,
+        website: label.website || null,
+      },
+    } : {}),
+    explorerLink: explorerUrl(chainId, "address", address),
+  };
+
+  out(output);
+}
+
 // ── Price command ───────────────────────────────────────────────────────────
 
 /**
@@ -1692,6 +1828,7 @@ Price & Analysis:
   price [ETH|BTC|MATIC|BNB]              On-chain token price from DEX pools
   price --chain polygon                   Native token price for a specific chain
   decode-tx <0xhash>                      Decode tx function call + event logs
+  address-info <address|name.eth>         Aggregate address info: type, balance, nonce, ENS, label
 
 RPC management:
   rpc-fetch [chain]                     Sync RPCs from metadata (all or one network)
@@ -1836,6 +1973,11 @@ Chain aliases: ethereum/eth, bitcoin/btc, arbitrum/arb, optimism/op, base, polyg
 
       case "decode-tx":
         await cmdDecodeTx(args[1], flagValue("--chain"), hasFlag("--private"));
+        break;
+
+      case "address-info":
+        if (!args[1]) err("Usage: address-info <address|name.eth> [--chain <chain>] [--private]");
+        await cmdAddressInfo(args[1], flagValue("--chain"), hasFlag("--private"));
         break;
 
       // ── RPC management ──
